@@ -15,7 +15,6 @@ import {
   Download,
   Upload,
   FileBarChart,
-  Save,
   ChevronDown,
   ChevronUp,
   Rocket,
@@ -44,7 +43,8 @@ const monthLabel = (key) => {
 let uid = 100;
 const nextId = () => uid++;
 
-const STORAGE_KEY = "salary-ledger-data-v1";
+const STORAGE_KEY = "salary-ledger-data-v2";
+const OLD_STORAGE_KEY = "salary-ledger-data-v1";
 
 const PROJECT_TYPES = ["عمرة", "حج", "بناء", "زواج", "أخرى"];
 
@@ -60,71 +60,147 @@ const FAMILY_NEED_CATEGORIES = [
   "احتياجات الملابس",
 ];
 
-const defaultState = () => ({
-  salary: 111000,
-  mother: 10000,
-  alimony: 5000,
-  installments: [
-    {
-      id: nextId(),
-      entity: "",
-      monthly: 12600,
-      total: 12,
-      remaining: 12,
-      payments: [],
-    },
-  ],
-  debts: [
-    {
-      id: nextId(),
-      entity: "",
-      totalAmount: 0,
-      monthly: 0,
-      paid: 0,
-      payments: [],
-    },
-  ],
-  projects: [
-    {
-      id: nextId(),
-      name: "",
-      type: PROJECT_TYPES[0],
-      totalAmount: 0,
-      monthly: 0,
-      saved: 0,
-      payments: [],
-    },
-  ],
-  familyNeeds: [
-    { id: nextId(), category: FAMILY_NEED_CATEGORIES[0], amount: 0 },
-  ],
-  rows: [
-    { id: nextId(), label: "مصاريف الأسرة", percent: 58.6 },
-    { id: nextId(), label: "القسط الشهري", percent: 11.4 },
-    { id: nextId(), label: "سداد الدين المنفصل", percent: 18.0 },
-    { id: nextId(), label: "ادخار للطوارئ", percent: 4.5 },
-    { id: nextId(), label: "احتياطي للمصاريف غير المتوقعة", percent: 7.5 },
-  ],
-  monthlyReports: [],
+const DEFAULT_ROWS = () => [
+  { id: nextId(), label: "مصاريف الأسرة", percent: 58.6 },
+  { id: nextId(), label: "القسط الشهري", percent: 11.4 },
+  { id: nextId(), label: "سداد الدين المنفصل", percent: 18.0 },
+  { id: nextId(), label: "ادخار للطوارئ", percent: 4.5 },
+  { id: nextId(), label: "احتياطي للمصاريف غير المتوقعة", percent: 7.5 },
+];
+
+const DEFAULT_FAMILY_NEEDS = () => [
+  { id: nextId(), category: FAMILY_NEED_CATEGORIES[0], amount: 0 },
+];
+
+// يبني سجل شهر جديد. إن أُعطي "base" (شهر سابق) فإنه ينقل عنه القيم
+// المتكررة (الراتب، مبلغ الأم، النفقة، جدول النسب، وأصناف احتياجات الأسرة)
+// لكن يُصفّر مبالغ احتياجات الأسرة لأنها تُستأنف من جديد كل شهر.
+const makeMonthEntry = (base, dateStr) => ({
+  salary: base ? base.salary : 111000,
+  mother: base ? base.mother : 10000,
+  alimony: base ? base.alimony : 5000,
+  familyNeeds: base
+    ? base.familyNeeds.map((f) => ({ id: nextId(), category: f.category, amount: 0 }))
+    : DEFAULT_FAMILY_NEEDS(),
+  rows: base
+    ? base.rows.map((r) => ({ id: nextId(), label: r.label, percent: r.percent }))
+    : DEFAULT_ROWS(),
+  date: dateStr || todayISO(),
+  createdAt: dateStr || todayISO(),
 });
+
+const defaultState = () => {
+  const monthKey = currentMonthKey();
+  return {
+    activeMonth: monthKey,
+    months: { [monthKey]: makeMonthEntry(null) },
+    installments: [
+      {
+        id: nextId(),
+        entity: "",
+        monthly: 12600,
+        total: 12,
+        remaining: 12,
+        payments: [],
+      },
+    ],
+    debts: [
+      {
+        id: nextId(),
+        entity: "",
+        totalAmount: 0,
+        monthly: 0,
+        paid: 0,
+        payments: [],
+      },
+    ],
+    projects: [
+      {
+        id: nextId(),
+        name: "",
+        type: PROJECT_TYPES[0],
+        totalAmount: 0,
+        monthly: 0,
+        saved: 0,
+        payments: [],
+      },
+    ],
+  };
+};
+
+// تحويل بيانات النسخة القديمة (v1 - راتب/احتياجات وحيدة بدون تقسيم شهري)
+// إلى الشكل الجديد المبني على الأشهر، مع محاولة استرجاع أي تقارير شهرية
+// قديمة كانت محفوظة كأرشيف.
+function migrateLegacyData(parsed) {
+  const monthKey = currentMonthKey();
+  const months = {};
+  (parsed.monthlyReports || []).forEach((r) => {
+    if (!r.month || months[r.month]) return;
+    months[r.month] = makeMonthEntry(
+      {
+        salary: r.salary ?? 0,
+        mother: r.mother ?? 0,
+        alimony: r.alimony ?? 0,
+        familyNeeds: [],
+        rows: DEFAULT_ROWS(),
+      },
+      r.savedAt
+    );
+    months[r.month].familyNeeds = [];
+  });
+  months[monthKey] = {
+    salary: typeof parsed.salary === "number" ? parsed.salary : 111000,
+    mother: typeof parsed.mother === "number" ? parsed.mother : 10000,
+    alimony: typeof parsed.alimony === "number" ? parsed.alimony : 5000,
+    familyNeeds: Array.isArray(parsed.familyNeeds) ? parsed.familyNeeds : DEFAULT_FAMILY_NEEDS(),
+    rows: Array.isArray(parsed.rows) ? parsed.rows : DEFAULT_ROWS(),
+    date: todayISO(),
+    createdAt: todayISO(),
+  };
+  return {
+    activeMonth: monthKey,
+    months,
+    installments: Array.isArray(parsed.installments) ? parsed.installments : [],
+    debts: Array.isArray(parsed.debts) ? parsed.debts : [],
+    projects: Array.isArray(parsed.projects) ? parsed.projects : [],
+  };
+}
+
+function seedIdsFrom(data) {
+  const allIds = [
+    ...(data.installments || []).map((i) => i.id),
+    ...(data.debts || []).map((d) => d.id),
+    ...(data.projects || []).map((p) => p.id),
+    ...Object.values(data.months || {}).flatMap((m) => [
+      ...(m.familyNeeds || []).map((f) => f.id),
+      ...(m.rows || []).map((r) => r.id),
+    ]),
+  ].filter((n) => typeof n === "number");
+  if (allIds.length) uid = Math.max(uid, ...allIds) + 1;
+}
 
 function loadInitialState() {
   if (typeof window === "undefined") return defaultState();
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return defaultState();
-    const parsed = JSON.parse(raw);
-    // بذرة المعرّفات كي لا تتضارب الهويات الجديدة مع المخزنة
-    const allIds = [
-      ...(parsed.installments || []).map((i) => i.id),
-      ...(parsed.debts || []).map((d) => d.id),
-      ...(parsed.projects || []).map((p) => p.id),
-      ...(parsed.familyNeeds || []).map((f) => f.id),
-      ...(parsed.rows || []).map((r) => r.id),
-      ...(parsed.monthlyReports || []).map((m) => m.id),
-    ].filter((n) => typeof n === "number");
-    if (allIds.length) uid = Math.max(uid, ...allIds) + 1;
-    return { ...defaultState(), ...parsed };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const merged = { ...defaultState(), ...parsed };
+      if (!merged.months || !merged.months[merged.activeMonth]) {
+        merged.months = { ...merged.months, [merged.activeMonth]: makeMonthEntry(null) };
+      }
+      seedIdsFrom(merged);
+      return merged;
+    }
+    // لا توجد بيانات بالشكل الجديد؛ حاول ترحيل بيانات النسخة القديمة إن وُجدت
+    const oldRaw = window.localStorage.getItem(OLD_STORAGE_KEY);
+    if (oldRaw) {
+      const parsedOld = JSON.parse(oldRaw);
+      const migrated = migrateLegacyData(parsedOld);
+      seedIdsFrom(migrated);
+      return migrated;
+    }
+    return defaultState();
   } catch {
     return defaultState();
   }
@@ -133,35 +209,94 @@ function loadInitialState() {
 export default function SalaryLedger() {
   const initial = useRef(loadInitialState());
 
-  const [salary, setSalary] = useState(initial.current.salary);
-  const [mother, setMother] = useState(initial.current.mother);
-  const [alimony, setAlimony] = useState(initial.current.alimony);
-
+  // البيانات المشتركة بين كل الأشهر (تستمر ولا تُصفَّر عند تجديد الشهر)
   const [installments, setInstallments] = useState(initial.current.installments);
-
   const [debts, setDebts] = useState(initial.current.debts);
-
   const [projects, setProjects] = useState(initial.current.projects);
 
-  const [familyNeeds, setFamilyNeeds] = useState(initial.current.familyNeeds);
-
-  const [rows, setRows] = useState(initial.current.rows);
-
-  const [monthlyReports, setMonthlyReports] = useState(initial.current.monthlyReports);
+  // سجل كل الأشهر + الشهر النشط المعروض/المُحرَّر حاليًا
+  const [months, setMonths] = useState(initial.current.months);
+  const [activeMonth, setActiveMonth] = useState(initial.current.activeMonth);
 
   const [openHistoryId, setOpenHistoryId] = useState(null);
   const [savedFlash, setSavedFlash] = useState(false);
   const importInputRef = useRef(null);
 
+  // بيانات الشهر النشط (مع حماية من انعدامها لأي سبب)
+  const activeMonthData = months[activeMonth] || makeMonthEntry(null);
+
+  const salary = activeMonthData.salary;
+  const mother = activeMonthData.mother;
+  const alimony = activeMonthData.alimony;
+  const familyNeeds = activeMonthData.familyNeeds;
+  const rows = activeMonthData.rows;
+  const monthDate = activeMonthData.date || todayISO();
+
+  const updateMonthField = (field, value) =>
+    setMonths((m) => ({
+      ...m,
+      [activeMonth]: { ...(m[activeMonth] || makeMonthEntry(null)), [field]: value },
+    }));
+
+  const setSalary = (v) => updateMonthField("salary", v);
+  const setMother = (v) => updateMonthField("mother", v);
+  const setAlimony = (v) => updateMonthField("alimony", v);
+  const setFamilyNeeds = (updater) =>
+    setMonths((m) => {
+      const cur = m[activeMonth] || makeMonthEntry(null);
+      const next = typeof updater === "function" ? updater(cur.familyNeeds) : updater;
+      return { ...m, [activeMonth]: { ...cur, familyNeeds: next } };
+    });
+  const setRows = (updater) =>
+    setMonths((m) => {
+      const cur = m[activeMonth] || makeMonthEntry(null);
+      const next = typeof updater === "function" ? updater(cur.rows) : updater;
+      return { ...m, [activeMonth]: { ...cur, rows: next } };
+    });
+
+  // الانتقال إلى شهر مسجَّل مسبقًا، أو تسجيل شهر جديد إن لم يكن موجودًا
+  // (تجدد المعلومات الخاصة بالشهر مع المحافظة على الديون/الأقساط المشتركة)
+  const goToMonth = (key) => {
+    if (!key) return;
+    setMonths((m) => {
+      if (m[key]) return m;
+      const sortedKeys = Object.keys(m).sort();
+      const latestKey = sortedKeys[sortedKeys.length - 1];
+      const base = m[latestKey];
+      return { ...m, [key]: makeMonthEntry(base, todayISO()) };
+    });
+    setActiveMonth(key);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2200);
+  };
+
+  const deleteMonth = (key) => {
+    const keys = Object.keys(months);
+    if (keys.length <= 1) {
+      window.alert("لا يمكن حذف الشهر الوحيد المسجَّل.");
+      return;
+    }
+    if (!window.confirm(`هل تريد حذف سجل شهر ${monthLabel(key)}؟ (لن يؤثر هذا على الديون والأقساط المشتركة)`)) return;
+    setMonths((m) => {
+      const next = { ...m };
+      delete next[key];
+      return next;
+    });
+    if (activeMonth === key) {
+      const remaining = keys.filter((k) => k !== key).sort();
+      setActiveMonth(remaining[remaining.length - 1]);
+    }
+  };
+
   // حفظ تلقائي في التخزين المحلي للجهاز عند أي تغيير
   useEffect(() => {
-    const data = { salary, mother, alimony, installments, debts, projects, familyNeeds, rows, monthlyReports };
+    const data = { activeMonth, months, installments, debts, projects };
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch {
       // تجاهل أخطاء التخزين (مثلاً في وضع التصفح الخاص)
     }
-  }, [salary, mother, alimony, installments, debts, projects, familyNeeds, rows, monthlyReports]);
+  }, [activeMonth, months, installments, debts, projects]);
 
   const installmentsTotal = useMemo(
     () => installments.reduce((s, i) => s + (Number(i.monthly) || 0), 0),
@@ -369,7 +504,7 @@ export default function SalaryLedger() {
 
   // نسخة احتياطية للبيانات
   const exportBackup = () => {
-    const data = { salary, mother, alimony, installments, debts, projects, familyNeeds, rows, monthlyReports };
+    const data = { activeMonth, months, installments, debts, projects };
     const blob = new Blob([JSON.stringify(data, null, 2)], {
       type: "application/json",
     });
@@ -392,15 +527,29 @@ export default function SalaryLedger() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        if (typeof parsed.salary === "number") setSalary(parsed.salary);
-        if (typeof parsed.mother === "number") setMother(parsed.mother);
-        if (typeof parsed.alimony === "number") setAlimony(parsed.alimony);
+        // نسخة احتياطية بالشكل الشهري الجديد
+        if (parsed.months && typeof parsed.months === "object") {
+          setMonths(parsed.months);
+          if (parsed.activeMonth && parsed.months[parsed.activeMonth]) {
+            setActiveMonth(parsed.activeMonth);
+          }
+        } else if (typeof parsed.salary === "number" || Array.isArray(parsed.familyNeeds)) {
+          // نسخة احتياطية بالشكل القديم (شهر واحد فقط) — نضعها في الشهر النشط الحالي
+          setMonths((m) => ({
+            ...m,
+            [activeMonth]: {
+              ...(m[activeMonth] || makeMonthEntry(null)),
+              salary: typeof parsed.salary === "number" ? parsed.salary : (m[activeMonth]?.salary ?? 0),
+              mother: typeof parsed.mother === "number" ? parsed.mother : (m[activeMonth]?.mother ?? 0),
+              alimony: typeof parsed.alimony === "number" ? parsed.alimony : (m[activeMonth]?.alimony ?? 0),
+              familyNeeds: Array.isArray(parsed.familyNeeds) ? parsed.familyNeeds : (m[activeMonth]?.familyNeeds ?? []),
+              rows: Array.isArray(parsed.rows) ? parsed.rows : (m[activeMonth]?.rows ?? []),
+            },
+          }));
+        }
         if (Array.isArray(parsed.installments)) setInstallments(parsed.installments);
         if (Array.isArray(parsed.debts)) setDebts(parsed.debts);
         if (Array.isArray(parsed.projects)) setProjects(parsed.projects);
-        if (Array.isArray(parsed.familyNeeds)) setFamilyNeeds(parsed.familyNeeds);
-        if (Array.isArray(parsed.rows)) setRows(parsed.rows);
-        if (Array.isArray(parsed.monthlyReports)) setMonthlyReports(parsed.monthlyReports);
         window.alert("تم استرجاع النسخة الاحتياطية بنجاح.");
       } catch {
         window.alert("تعذّرت قراءة الملف. تأكد أنه ملف نسخة احتياطية صالح (JSON).");
@@ -410,38 +559,18 @@ export default function SalaryLedger() {
     e.target.value = "";
   };
 
-  // تقرير شهري عن الوضعية المالية
-  const currentMonth = currentMonthKey();
-  const existingReportThisMonth = monthlyReports.find((r) => r.month === currentMonth);
-
-  const saveMonthlyReport = () => {
-    const snapshot = {
-      id: existingReportThisMonth ? existingReportThisMonth.id : nextId(),
-      month: currentMonth,
-      savedAt: todayISO(),
-      salary,
-      mother,
-      alimony,
-      installmentsTotal,
-      debtsMonthlyTotal,
-      projectsMonthlyTotal,
-      projectsRemainingTotal,
-      combinedSavingsTotal,
-      totalFixed,
-      remaining,
-      installmentsRemainingTotal,
-      debtsRemainingTotal,
-    };
-    setMonthlyReports((list) => {
-      const others = list.filter((r) => r.month !== currentMonth);
-      return [...others, snapshot].sort((a, b) => (a.month < b.month ? 1 : -1));
-    });
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 2200);
+  // ملخّص أي شهر مسجَّل (يُستخدم في جدول سجل الأشهر)، بالاستناد إلى بياناته
+  // الخاصة (الراتب/الأم/النفقة/الاحتياجات) مع الديون والأقساط والمشاريع
+  // المشتركة الحالية، باعتبارها التزامات مستمرة عبر الأشهر.
+  const summarizeMonth = (m) => {
+    const totalFixedM = (Number(m.mother) || 0) + (Number(m.alimony) || 0) + installmentsTotal + debtsMonthlyTotal + projectsMonthlyTotal;
+    const remainingM = (Number(m.salary) || 0) - totalFixedM;
+    const familyTotalM = (m.familyNeeds || []).reduce((s, f) => s + (Number(f.amount) || 0), 0);
+    return { totalFixedM, remainingM, familyTotalM };
   };
 
-  const deleteMonthlyReport = (id) =>
-    setMonthlyReports((list) => list.filter((r) => r.id !== id));
+  const todayMonthKey = currentMonthKey();
+  const sortedMonthKeys = Object.keys(months).sort((a, b) => (a < b ? 1 : -1));
 
   return (
     <div dir="rtl" lang="ar" className="ledger-root">
@@ -504,6 +633,46 @@ export default function SalaryLedger() {
           background-repeat: repeat-x;
         }
 
+        .month-bar {
+          background: var(--panel);
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          padding: 14px 18px;
+          margin-bottom: 16px;
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          flex-wrap: wrap;
+        }
+        .month-bar-field { display: flex; flex-direction: column; gap: 4px; }
+        .month-bar-field label {
+          font-size: 11.5px;
+          color: var(--muted);
+          font-weight: 600;
+        }
+        .month-bar input[type="month"],
+        .month-bar input[type="date"] {
+          font-family: 'IBM Plex Sans Arabic', sans-serif;
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--emerald-dark);
+          border: 1.5px solid var(--line);
+          border-radius: 8px;
+          padding: 7px 10px;
+          background: #fff;
+        }
+        .month-bar .active-label {
+          font-size: 13px;
+          font-weight: 700;
+          color: var(--emerald-dark);
+          background: #EAF3EE;
+          border-radius: 999px;
+          padding: 6px 14px;
+        }
+        .month-bar .today-hint {
+          font-size: 12px;
+          color: var(--muted);
+        }
         .salary-row {
           display: flex;
           align-items: center;
@@ -869,6 +1038,44 @@ export default function SalaryLedger() {
         <div className="eyebrow kufi">مسيّر الراتب الشخصي</div>
         <h1 className="title kufi">توزيع الراتب والالتزامات</h1>
 
+        {/* Month bar: تسجيل التسيير الشهري */}
+        <div className="month-bar">
+          <div className="month-bar-field">
+            <label htmlFor="month-picker">الشهر</label>
+            <input
+              id="month-picker"
+              type="month"
+              value={activeMonth}
+              onChange={(e) => goToMonth(e.target.value)}
+            />
+          </div>
+          <div className="month-bar-field">
+            <label htmlFor="month-date">تاريخ التسجيل</label>
+            <input
+              id="month-date"
+              type="date"
+              value={monthDate}
+              onChange={(e) => updateMonthField("date", e.target.value)}
+            />
+          </div>
+          <span className="active-label">
+            <History size={13} style={{ verticalAlign: "-2px" }} /> يُعرض الآن: {monthLabel(activeMonth)}
+          </span>
+          {activeMonth !== todayMonthKey && (
+            <button className="btn-outline" onClick={() => goToMonth(todayMonthKey)}>
+              الانتقال إلى الشهر الحالي ({monthLabel(todayMonthKey)})
+            </button>
+          )}
+          {savedFlash && (
+            <span className="saved-flash">
+              <CheckCircle2 size={14} /> تم تجهيز الشهر
+            </span>
+          )}
+          <span className="today-hint">
+            اختيار شهر غير مسجَّل ينشئ سجلًا جديدًا له تلقائيًا، وينقل الراتب والنسب من آخر شهر مسجَّل، بينما تبقى الديون والأقساط والمشاريع مشتركة بين كل الأشهر.
+          </span>
+        </div>
+
         {/* Hero receipt */}
         <div className="receipt">
           <div className="salary-row">
@@ -906,6 +1113,9 @@ export default function SalaryLedger() {
           <div className="section-head">
             <Scale size={18} />
             <h2>الالتزامات الشهرية الثابتة</h2>
+          </div>
+          <div className="today-hint" style={{ marginBottom: 10 }}>
+            مبلغ الأم والنفقة خاصان بشهر {monthLabel(activeMonth)}. أما الأقساط والديون أدناه فهي مشتركة بين كل الأشهر وتستمر معلوماتها (كعدد الأقساط المتبقي والمبالغ المسددة) حتى تكتمل، بصرف النظر عن الشهر المعروض.
           </div>
 
           <div className="card accent-gold">
@@ -1163,6 +1373,9 @@ export default function SalaryLedger() {
             <Rocket size={18} />
             <h2>المشاريع المستقبلية</h2>
           </div>
+          <div className="today-hint" style={{ marginBottom: 10 }}>
+            هذه المشاريع مشتركة بين كل الأشهر؛ يستمر ادخارها من شهر لآخر حتى تكتمل.
+          </div>
 
           <div className="list-title-row">
             <div className="who">
@@ -1355,6 +1568,9 @@ export default function SalaryLedger() {
             <ListChecks size={18} />
             <h2>تفصيل احتياجات الأسرة</h2>
           </div>
+          <div className="today-hint" style={{ marginBottom: 10 }}>
+            هذه البنود خاصة بشهر {monthLabel(activeMonth)}؛ تُستأنف فارغة عند الانتقال إلى شهر جديد.
+          </div>
 
           <div className="list-title-row">
             <div className="who">
@@ -1421,79 +1637,69 @@ export default function SalaryLedger() {
           </div>
         </div>
 
-        {/* Monthly financial report */}
+        {/* Months log: سجل الأشهر المسجَّلة */}
         <div className="section">
           <div className="section-head">
             <FileBarChart size={18} />
-            <h2>التقرير الشهري عن الوضعية المالية</h2>
+            <h2>سجل الأشهر</h2>
           </div>
 
           <div className="card accent-emerald">
-            <div className="fixed-simple" style={{ flexWrap: "wrap" }}>
-              <div className="who">
-                <History size={16} color="#0F5C46" />
-                شهر {monthLabel(currentMonth)}
-                {existingReportThisMonth && (
-                  <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: 12 }}>
-                    (تم حفظ تقرير لهذا الشهر بتاريخ {existingReportThisMonth.savedAt})
-                  </span>
-                )}
-              </div>
-              <div>
-                <button className="btn-solid" onClick={saveMonthlyReport}>
-                  <Save size={15} />
-                  {existingReportThisMonth ? "تحديث تقرير هذا الشهر" : "حفظ تقرير هذا الشهر"}
-                </button>
-                {savedFlash && (
-                  <span className="saved-flash">
-                    <CheckCircle2 size={14} /> تم الحفظ
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="backup-hint">
-              يلتقط التقرير صورة للوضع الحالي: الراتب، الالتزامات الشهرية، الباقي بعد الالتزامات، ومجموع المتبقي من الأقساط والديون.
+            <div className="backup-hint" style={{ marginTop: 0 }}>
+              كل شهر يُسجَّل تلقائيًا عند اختياره من خانة "الشهر" أعلاه. اضغط على أي شهر في الجدول للانتقال إليه وتعديل بياناته. الديون والأقساط والمشاريع مشتركة بين كل الأشهر ولا تتأثر بالتنقل بينها.
             </div>
           </div>
 
-          {monthlyReports.length === 0 ? (
-            <div className="card">
-              <div className="empty-note">لا توجد تقارير محفوظة بعد. اضغط "حفظ تقرير هذا الشهر" لبدء الأرشيف الشهري.</div>
-            </div>
-          ) : (
-            <div className="card" style={{ overflowX: "auto" }}>
-              <table className="report">
-                <thead>
-                  <tr>
-                    <th>الشهر</th>
-                    <th>الراتب</th>
-                    <th>الالتزامات الثابتة</th>
-                    <th>الباقي بعد الالتزامات</th>
-                    <th>متبقي الأقساط</th>
-                    <th>متبقي الديون</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {monthlyReports.map((r) => (
-                    <tr key={r.id}>
-                      <td>{monthLabel(r.month)}</td>
-                      <td className="tab-num">{fmt(r.salary)}</td>
-                      <td className="tab-num">{fmt(r.totalFixed)}</td>
-                      <td className={`tab-num ${r.remaining >= 0 ? "pos" : "neg"}`}>{fmt(r.remaining)}</td>
-                      <td className="tab-num">{fmt(r.installmentsRemainingTotal)}</td>
-                      <td className="tab-num">{fmt(r.debtsRemainingTotal)}</td>
+          <div className="card" style={{ overflowX: "auto" }}>
+            <table className="report">
+              <thead>
+                <tr>
+                  <th>الشهر</th>
+                  <th>تاريخ التسجيل</th>
+                  <th>الراتب</th>
+                  <th>الالتزامات الثابتة</th>
+                  <th>الباقي بعد الالتزامات</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedMonthKeys.map((key) => {
+                  const m = months[key];
+                  const { totalFixedM, remainingM } = summarizeMonth(m);
+                  const isActive = key === activeMonth;
+                  return (
+                    <tr
+                      key={key}
+                      onClick={() => setActiveMonth(key)}
+                      style={{
+                        cursor: "pointer",
+                        background: isActive ? "#EAF3EE" : "transparent",
+                        fontWeight: isActive ? 700 : 400,
+                      }}
+                    >
+                      <td>{monthLabel(key)}{isActive ? " ●" : ""}</td>
+                      <td>{m.date || "—"}</td>
+                      <td className="tab-num">{fmt(m.salary)}</td>
+                      <td className="tab-num">{fmt(totalFixedM)}</td>
+                      <td className={`tab-num ${remainingM >= 0 ? "pos" : "neg"}`}>{fmt(remainingM)}</td>
                       <td>
-                        <button className="del" onClick={() => deleteMonthlyReport(r.id)} title="حذف التقرير">
+                        <button
+                          className="del"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteMonth(key);
+                          }}
+                          title="حذف سجل هذا الشهر"
+                        >
                           <Trash2 size={14} />
                         </button>
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         {/* Backup */}
